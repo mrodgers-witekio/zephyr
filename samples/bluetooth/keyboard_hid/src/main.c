@@ -105,7 +105,10 @@ int main(void)
 
 	LOG_INF("Bluetooth initialized");
 
-	hog_init();
+	if (0 != hog_init()) {
+		LOG_ERR("Failed to initialise GPIOs");
+		return -EINVAL;
+	}
 
 	err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad), NULL, 0);
 	if (err) {

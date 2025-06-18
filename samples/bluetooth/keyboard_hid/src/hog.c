@@ -29,6 +29,8 @@
 
 LOG_MODULE_REGISTER(keyboard, LOG_LEVEL_DBG);
 
+static K_SEM_DEFINE(gpio_sem, 0, 1);
+
 enum {
 	HIDS_REMOTE_WAKE = BIT(0),
 	HIDS_NORMALLY_CONNECTABLE = BIT(1),
@@ -161,16 +163,65 @@ static const uint8_t keycodes[SWITCH_COUNT] = {
 	0x07, /* D */
 };
 
-void hog_init(void)
+static struct gpio_callback gpio_cb_data;
+
+void on_gpio_edge(const struct device *port, struct gpio_callback *cb, gpio_port_pins_t pins)
 {
+	k_sem_give(&gpio_sem);
+}
+
+
+int hog_init(void)
+{
+	/* For simplicity we make (and verify) the assumption that all pins are on the same port */
+	const struct device *port = switches[0].port;
+	uint32_t pins = 0;
+
 	for (uint32_t i = 0; i < SWITCH_COUNT; i++) {
-		gpio_pin_configure_dt(&switches[i], GPIO_INPUT);
+		const struct gpio_dt_spec *spec = &switches[i];
+
+		if (!gpio_is_ready_dt(spec)) {
+			LOG_ERR("GPIO is not ready");
+			return -ENODEV;
+		}
+
+		if (spec->port != port) {
+			LOG_ERR("All GPIOs must be on the same port");
+			return -EINVAL;
+		}
+
+		if (0 != gpio_pin_configure_dt(&switches[i], GPIO_INPUT)) {
+			LOG_ERR("Failed to configure GPIO pin");
+			return -EINVAL;
+		}
+
+		if (0 != gpio_pin_interrupt_configure_dt(&switches[i], GPIO_INT_EDGE_BOTH)) {
+			LOG_ERR("Failed to configure GPIO pin interrupt");
+			return -EINVAL;
+		}
+
+		pins |= BIT(spec->pin);
 	}
+
+	gpio_init_callback(&gpio_cb_data, on_gpio_edge, pins);
+
+	if (0 != gpio_add_callback(port, &gpio_cb_data)) {
+		LOG_ERR("Failed to add GPIO callback");
+		return -EINVAL;
+	}
+
+	return 0;
 }
 
 void hog_button_loop(void)
 {
 	while (1) {
+		k_sem_take(&gpio_sem, K_FOREVER);
+
+		/* Ignore any further GPIO events in the next xx ms as a crude debounce strategy */
+		k_sem_take(&gpio_sem, K_MSEC(30));
+		LOG_INF("Button event");
+
 		if (subscribed) {
 			/* HID Report:
 			 *   See report layout here: https://wiki.osdev.org/USB_Human_Interface_Devices#USB_keyboard
@@ -197,6 +248,5 @@ void hog_button_loop(void)
 			bt_gatt_notify(NULL, &hog_svc.attrs[5],
 				       report, sizeof(report));
 		}
-		k_sleep(K_MSEC(100));
 	}
 }
